@@ -4,6 +4,7 @@
 # (Flyway n'est pas réversible : on ne « dé-migre » jamais, on restaure).
 #
 #   ./update.sh --version 1.4.0                    # installation faite avec --images-prebuilt (images publiques GHCR dans .env) : tire les images
+#   ./update.sh --version 1.4.0 --registre ghcr.io/autre/immogest   # idem avec un autre préfixe d'images (sans sources sur le serveur, GHCR de l'éditeur par défaut)
 #   ./update.sh --version 1.4.0 --verifier-signature   # idem, après contrôle de la signature cosign (cosign requis)
 #   ./update.sh                                    # dernière version publiée par l'éditeur (IMMOGEST_LICENCE_SERVEUR_URL)
 #   ./update.sh --archive immogest-1.4.0.tar.gz --sha256 <somme>   # hors ligne (réseau local) : archive remise sur clé USB
@@ -14,7 +15,7 @@
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")"
 
-ARCHIVE=""; URL=""; SHA=""; VERSION=""; SOURCES=0; YES=0; VERIFIER=0
+ARCHIVE=""; URL=""; SHA=""; VERSION=""; SOURCES=0; YES=0; VERIFIER=0; PREFIXE=""
 erreur() { echo "ERREUR : $*" >&2; exit 1; }
 info() { echo "==> $*"; }
 while [ $# -gt 0 ]; do
@@ -23,6 +24,7 @@ while [ $# -gt 0 ]; do
     --url) URL="${2:-}"; shift 2 ;;
     --sha256) SHA="${2:-}"; shift 2 ;;
     --version) VERSION="${2:-}"; shift 2 ;;
+    --registre) PREFIXE="${2:-}"; shift 2 ;;
     --depuis-les-sources) SOURCES=1; shift ;;
     --verifier-signature) VERIFIER=1; shift ;;
     --yes) YES=1; shift ;;
@@ -40,6 +42,15 @@ ANCIENNE="${IMMOGEST_VERSION:-latest}"
 # Noms des images (registre ou locales) : ceux de .env pour une installation faite avec --images-prebuilt
 IMG_app="${IMMOGEST_IMAGE_APP:-immogest/app}"; IMG_web="${IMMOGEST_IMAGE_WEB:-immogest/web}"; IMG_sauvegarde="${IMMOGEST_IMAGE_SAUVEGARDE:-immogest/sauvegarde}"
 REGISTRE=0; [ -z "${IMMOGEST_IMAGE_APP:-}" ] || REGISTRE=1
+# Noms avant un éventuel passage au registre : ce sont eux que le retour arrière retrouve
+IMGANC_app="$IMG_app"; IMGANC_web="$IMG_web"; IMGANC_sauvegarde="$IMG_sauvegarde"
+# --version X sans archive ni sources : on tire les images X du registre (--registre PREFIX, sinon celui de l'éditeur), même si cette installation
+# n'en venait pas (ses noms d'images sont alors écrits dans .env)
+if [ "$REGISTRE" = 0 ] && [ "$SOURCES" = 0 ] && [ -z "$ARCHIVE" ] && [ -z "$URL" ] && { [ -n "$PREFIXE" ] || { [ -n "$VERSION" ] && [ ! -f ../backend/pom.xml ]; }; }; then
+  PREFIXE="${PREFIXE:-ghcr.io/fixedevelloper/immogest}"
+  IMG_app="$PREFIXE-app"; IMG_web="$PREFIXE-web"; IMG_sauvegarde="$PREFIXE-sauvegarde"; REGISTRE=1
+  info "Images tirées du registre : $PREFIXE-{app,web,sauvegarde}"
+fi
 TMP=$(mktemp -d); trap 'rm -rf "${TMP:?}"' EXIT
 
 attendre_sain() { # attendre_sain SERVICE SECONDES
@@ -123,7 +134,7 @@ integrite "$TMP/avant.txt"
 info "Sauvegarde $SAUVEGARDE_ID faite"
 
 # ------------------------------------------------------------------ 3. mise en place
-for s in app web sauvegarde; do var="IMG_$s"; docker image inspect "${!var}:$ANCIENNE" >/dev/null 2>&1 && docker tag "${!var}:$ANCIENNE" "${!var}:avant-mise-a-jour"; done
+for s in app web sauvegarde; do var="IMGANC_$s"; docker image inspect "${!var}:$ANCIENNE" >/dev/null 2>&1 && docker tag "${!var}:$ANCIENNE" "${!var}:avant-mise-a-jour"; done
 FICHIERS="docker-compose.yml Caddyfile.domaine Caddyfile.local Caddyfile.tunnel install.sh update.sh backup.sh restore.sh package-release.sh diagnostic.sh"
 rm -rf .avant-mise-a-jour; mkdir .avant-mise-a-jour
 for f in $FICHIERS .env; do [ -f "$f" ] && cp -p "$f" .avant-mise-a-jour/; done
@@ -143,7 +154,7 @@ retour_arriere() {
   echo "==> Retour arrière : restauration de la sauvegarde $SAUVEGARDE_ID et de l'ancienne version $ANCIENNE" >&2
   docker compose stop app web >&2 || true
   for f in $FICHIERS .env; do [ -f ".avant-mise-a-jour/$f" ] && cp -p ".avant-mise-a-jour/$f" "./$f"; done
-  for s in app web sauvegarde; do var="IMG_$s"; docker image inspect "${!var}:avant-mise-a-jour" >/dev/null 2>&1 && docker tag "${!var}:avant-mise-a-jour" "${!var}:$ANCIENNE"; done
+  for s in app web sauvegarde; do var="IMGANC_$s"; docker image inspect "${!var}:avant-mise-a-jour" >/dev/null 2>&1 && docker tag "${!var}:avant-mise-a-jour" "${!var}:$ANCIENNE"; done
   set -a; . ./.env; set +a
   docker compose up -d sauvegarde >&2
   sleep 5
@@ -159,6 +170,12 @@ retour_arriere() {
 # ------------------------------------------------------------------ 4. migration + redémarrage
 info "Redémarrage en version $VERSION (les migrations de base s'exécutent au démarrage)"
 sed -i "s/^IMMOGEST_VERSION=.*/IMMOGEST_VERSION=$VERSION/" .env
+if [ "$REGISTRE" = 1 ]; then # noms des images du registre mémorisés (remplacés s'ils existent, sinon ajoutés)
+  for pair in "APP:$IMG_app" "WEB:$IMG_web" "SAUVEGARDE:$IMG_sauvegarde"; do
+    cle="IMMOGEST_IMAGE_${pair%%:*}"; val="${pair#*:}"
+    if grep -q "^$cle=" .env; then sed -i "s|^$cle=.*|$cle=$val|" .env; else printf '%s=%s\n' "$cle" "$val" >> .env; fi
+  done
+fi
 set -a; . ./.env; set +a
 docker compose up -d || retour_arriere "démarrage impossible"
 attendre_sain app 300 || retour_arriere "l'application ne démarre pas (migration en échec ?)"
