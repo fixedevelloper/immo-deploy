@@ -17,7 +17,7 @@ set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")"
 
 MODE=""; SITE=""; STOCKAGE=""; S3_ENDPOINT=""; S3_BUCKET="immogest"; S3_REGION="us-east-1"; S3_ACCESS=""; S3_SECRET=""
-HTTP_PORT=80; HTTPS_PORT=443; TUNNEL_TOKEN=""; VERSION="latest"; LICENCE_URL=""; CLE_PUBLIQUE=""; PREBUILT=0; REGISTRE="ghcr.io/fixedevelloper/immogest"; DEMARRER=1; YES=0
+HTTP_PORT=80; HTTPS_PORT=443; TUNNEL_TOKEN=""; VERSION="latest"; LICENCE_URL=""; CLE_PUBLIQUE=""; PREBUILT=0; REGISTRE="ghcr.io/fixedevelloper/immogest"; DEMARRER=1; YES=0; PORT_HTTP_FOURNI=0; PORT_HTTPS_FOURNI=0
 
 erreur() { echo "ERREUR : $*" >&2; exit 1; }
 info() { echo "==> $*"; }
@@ -31,8 +31,8 @@ while [ $# -gt 0 ]; do
     --s3-region) S3_REGION="${2:-}"; shift 2 ;;
     --s3-access-key) S3_ACCESS="${2:-}"; shift 2 ;;
     --s3-secret-key) S3_SECRET="${2:-}"; shift 2 ;;
-    --port-http) HTTP_PORT="${2:-}"; shift 2 ;;
-    --port-https) HTTPS_PORT="${2:-}"; shift 2 ;;
+    --port-http) HTTP_PORT="${2:-}"; PORT_HTTP_FOURNI=1; shift 2 ;;
+    --port-https) HTTPS_PORT="${2:-}"; PORT_HTTPS_FOURNI=1; shift 2 ;;
     --tunnel-token) TUNNEL_TOKEN="${2:-}"; shift 2 ;;
     --version) VERSION="${2:-}"; shift 2 ;;
     --licence-serveur-url) LICENCE_URL="${2:-}"; shift 2 ;;
@@ -185,6 +185,13 @@ ENV
 fi
 
 # ------------------------------------------------------------------ ports (hors tunnel)
+# .env existant : il n'est pas réécrit, mais les ports demandés en ligne de commande y sont appliqués (aucun secret touché)
+for pair in "IMMOGEST_HTTP_PORT=$HTTP_PORT=$PORT_HTTP_FOURNI" "IMMOGEST_HTTPS_PORT=$HTTPS_PORT=$PORT_HTTPS_FOURNI"; do
+  IFS== read -r var val fourni <<< "$pair"
+  [ "$fourni" = 1 ] || continue
+  [[ "$val" =~ ^[0-9]+$ ]] && [ "$val" -ge 1 ] && [ "$val" -le 65535 ] || erreur "port invalide : $val"
+  if grep -q "^$var=" .env; then sed -i "s/^$var=.*/$var=$val/" .env; else printf '%s=%s\n' "$var" "$val" >> .env; fi
+done
 set -a; . ./.env; set +a
 if [ "$DEMARRER" = 1 ] && [ "${CADDYFILE:-}" != Caddyfile.tunnel ] && command -v ss >/dev/null 2>&1; then
   if ! docker compose ps --status running --services 2>/dev/null | grep -qx caddy; then
