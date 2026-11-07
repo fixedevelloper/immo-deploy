@@ -17,7 +17,7 @@ set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")"
 
 MODE=""; SITE=""; STOCKAGE=""; S3_ENDPOINT=""; S3_BUCKET="immogest"; S3_REGION="us-east-1"; S3_ACCESS=""; S3_SECRET=""
-HTTP_PORT=80; HTTPS_PORT=443; TUNNEL_TOKEN=""; VERSION="latest"; LICENCE_URL=""; CLE_PUBLIQUE=""; PREBUILT=0; REGISTRE="ghcr.io/fixedevelloper/immogest"; DEMARRER=1; YES=0; PORT_HTTP_FOURNI=0; PORT_HTTPS_FOURNI=0
+HTTP_PORT=80; HTTPS_PORT=443; TUNNEL_TOKEN=""; VERSION="latest"; LICENCE_URL=""; CLE_PUBLIQUE=""; PREBUILT=0; REGISTRE="ghcr.io/fixedevelloper/immogest"; DEMARRER=1; YES=0; VERSION_FOURNIE=0; PORT_HTTP_FOURNI=0; PORT_HTTPS_FOURNI=0
 
 erreur() { echo "ERREUR : $*" >&2; exit 1; }
 info() { echo "==> $*"; }
@@ -34,7 +34,7 @@ while [ $# -gt 0 ]; do
     --port-http) HTTP_PORT="${2:-}"; PORT_HTTP_FOURNI=1; shift 2 ;;
     --port-https) HTTPS_PORT="${2:-}"; PORT_HTTPS_FOURNI=1; shift 2 ;;
     --tunnel-token) TUNNEL_TOKEN="${2:-}"; shift 2 ;;
-    --version) VERSION="${2:-}"; shift 2 ;;
+    --version) VERSION="${2:-}"; VERSION_FOURNIE=1; shift 2 ;;
     --licence-serveur-url) LICENCE_URL="${2:-}"; shift 2 ;;
     --cle-publique) CLE_PUBLIQUE="${2:-}"; shift 2 ;;
     --registre) REGISTRE="${2:-}"; shift 2 ;;
@@ -46,6 +46,9 @@ while [ $# -gt 0 ]; do
     *) erreur "option inconnue : $1" ;;
   esac
 done
+
+# Sans les sources du dépôt (dossier deploy copié seul) il n'y a rien à construire : on installe les images publiées
+if [ "$PREBUILT" = 0 ] && [ ! -f ../backend/pom.xml ]; then PREBUILT=1; info "Sources absentes : installation à partir des images publiées (${REGISTRE})"; fi
 
 demander() { # demander VARIABLE "question" [défaut]
   local var="$1" question="$2" defaut="${3:-}" reponse=""
@@ -186,6 +189,14 @@ fi
 
 # ------------------------------------------------------------------ ports (hors tunnel)
 # .env existant : il n'est pas réécrit, mais les ports demandés en ligne de commande y sont appliqués (aucun secret touché)
+# Idem pour la version et les noms d'images (installation déjà faite sans --images-prebuilt, ou version à changer)
+ecrire_env() { if grep -q "^$1=" .env; then sed -i "s|^$1=.*|$1=$2|" .env; else printf '%s=%s\n' "$1" "$2" >> .env; fi; }
+[ "$VERSION_FOURNIE" != 1 ] || ecrire_env IMMOGEST_VERSION "$VERSION"
+if [ "$PREBUILT" = 1 ] && ! grep -q '^IMMOGEST_IMAGE_APP=' .env; then
+  ecrire_env IMMOGEST_IMAGE_APP "${IMMOGEST_IMAGE_APP:-$REGISTRE-app}"
+  ecrire_env IMMOGEST_IMAGE_WEB "${IMMOGEST_IMAGE_WEB:-$REGISTRE-web}"
+  ecrire_env IMMOGEST_IMAGE_SAUVEGARDE "${IMMOGEST_IMAGE_SAUVEGARDE:-$REGISTRE-sauvegarde}"
+fi
 for pair in "IMMOGEST_HTTP_PORT=$HTTP_PORT=$PORT_HTTP_FOURNI" "IMMOGEST_HTTPS_PORT=$HTTPS_PORT=$PORT_HTTPS_FOURNI"; do
   IFS== read -r var val fourni <<< "$pair"
   [ "$fourni" = 1 ] || continue
