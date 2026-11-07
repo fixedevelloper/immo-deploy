@@ -1,0 +1,160 @@
+# Production ImmoGest. Ne se lance pas à la main la première fois : deploy/install.sh génère deploy/.env.
+#   cd deploy && docker compose up -d
+# Profils (COMPOSE_PROFILES dans .env) : « stockage-local » (SeaweedFS) ; « tunnel » (Cloudflare Tunnel).
+# Stockage S3 externe : ne pas activer « stockage-local » et renseigner IMMOGEST_S3_* dans .env.
+name: immogest
+
+services:
+  postgres:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: immogest
+      POSTGRES_USER: immogest
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?exécutez install.sh}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    networks: [interne]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U immogest -d immogest"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  # Stockage objet S3 livré avec l'installation. Réseau interne uniquement : aucun port publié, jamais joignable depuis Internet.
+  seaweedfs:
+    profiles: ["stockage-local"]
+    image: chrislusf/seaweedfs:4.50
+    restart: unless-stopped
+    command: server -dir=/data -s3 -s3.config=/etc/seaweedfs/s3.json
+    volumes:
+      - seaweed:/data
+      - ./generated/s3.json:/etc/seaweedfs/s3.json:ro
+    networks: [interne]
+
+  app:
+    image: ${IMMOGEST_IMAGE_APP:-immogest/app}:${IMMOGEST_VERSION:-latest}
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.app
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      seaweedfs:
+        condition: service_started
+        required: false
+    environment:
+      SPRING_PROFILES_ACTIVE: prod
+      IMMOGEST_DB_URL: jdbc:postgresql://postgres:5432/immogest
+      IMMOGEST_DB_USER: immogest
+      IMMOGEST_DB_PASSWORD: ${POSTGRES_PASSWORD}
+      IMMOGEST_JWT_SECRET: ${IMMOGEST_JWT_SECRET:?exécutez install.sh}
+      IMMOGEST_CLE_CHIFFREMENT: ${IMMOGEST_CLE_CHIFFREMENT:?exécutez install.sh}
+      IMMOGEST_S3_ENDPOINT: ${IMMOGEST_S3_ENDPOINT:-http://seaweedfs:8333}
+      IMMOGEST_S3_REGION: ${IMMOGEST_S3_REGION:-us-east-1}
+      IMMOGEST_S3_BUCKET: ${IMMOGEST_S3_BUCKET:-immogest}
+      IMMOGEST_S3_ACCESS_KEY: ${IMMOGEST_S3_ACCESS_KEY:?exécutez install.sh}
+      IMMOGEST_S3_SECRET_KEY: ${IMMOGEST_S3_SECRET_KEY:?exécutez install.sh}
+      IMMOGEST_MACHINE_ID: ${IMMOGEST_MACHINE_ID:?exécutez install.sh}
+      IMMOGEST_LICENCE_SERVEUR_URL: ${IMMOGEST_LICENCE_SERVEUR_URL:-}
+      IMMOGEST_LICENCE_CLE_PUBLIQUE: ${IMMOGEST_LICENCE_CLE_PUBLIQUE:-}
+      IMMOGEST_RESEAU_LOCAL: ${IMMOGEST_RESEAU_LOCAL:-false}
+      IMMOGEST_VERSION: ${IMMOGEST_VERSION:-latest}
+      IMMOGEST_SAUVEGARDE_REPERTOIRE: /sauvegardes
+      IMMOGEST_SAUVEGARDE_DEMANDES: /demandes
+      IMMOGEST_SAUVEGARDE_HEURE: ${SAUVEGARDE_HEURE:-02:30}
+    volumes:
+      - sauvegardes:/sauvegardes:ro
+      - demandes:/demandes
+    # interne : base et stockage ; exposee : sortie vers Internet (SMS, agrégateurs, serveur de licences)
+    networks: [interne, exposee]
+
+  # Sauvegarde quotidienne (pg_dump + copie du bucket S3, rotation) et traitement des demandes de l'écran Paramètres > Sauvegardes.
+  # Copie externe : soit un autre S3 (SAUVEGARDE_EXTERNE_S3_*), soit un dossier monté (SAUVEGARDE_DISQUE_EXTERNE=/chemin/sur/l'hôte).
+  sauvegarde:
+    image: ${IMMOGEST_IMAGE_SAUVEGARDE:-immogest/sauvegarde}:${IMMOGEST_VERSION:-latest}
+    build:
+      context: .
+      dockerfile: Dockerfile.sauvegarde
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PGHOST: postgres
+      PGUSER: immogest
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+      PGDATABASE: immogest
+      IMMOGEST_VERSION: ${IMMOGEST_VERSION:-latest}
+      IMMOGEST_CLE_CHIFFREMENT: ${IMMOGEST_CLE_CHIFFREMENT}
+      SAUVEGARDE_PASSPHRASE: ${SAUVEGARDE_PASSPHRASE:-}
+      SAUVEGARDE_HEURE: ${SAUVEGARDE_HEURE:-02:30}
+      SAUVEGARDE_RETENTION_JOURS: ${SAUVEGARDE_RETENTION_JOURS:-30}
+      IMMOGEST_S3_ENDPOINT: ${IMMOGEST_S3_ENDPOINT:-http://seaweedfs:8333}
+      IMMOGEST_S3_REGION: ${IMMOGEST_S3_REGION:-us-east-1}
+      IMMOGEST_S3_BUCKET: ${IMMOGEST_S3_BUCKET:-immogest}
+      IMMOGEST_S3_ACCESS_KEY: ${IMMOGEST_S3_ACCESS_KEY}
+      IMMOGEST_S3_SECRET_KEY: ${IMMOGEST_S3_SECRET_KEY}
+      SAUVEGARDE_EXTERNE_S3_ENDPOINT: ${SAUVEGARDE_EXTERNE_S3_ENDPOINT:-}
+      SAUVEGARDE_EXTERNE_S3_BUCKET: ${SAUVEGARDE_EXTERNE_S3_BUCKET:-}
+      SAUVEGARDE_EXTERNE_S3_PREFIXE: ${SAUVEGARDE_EXTERNE_S3_PREFIXE:-immogest}
+      SAUVEGARDE_EXTERNE_S3_ACCESS_KEY: ${SAUVEGARDE_EXTERNE_S3_ACCESS_KEY:-}
+      SAUVEGARDE_EXTERNE_S3_SECRET_KEY: ${SAUVEGARDE_EXTERNE_S3_SECRET_KEY:-}
+      SAUVEGARDE_EXTERNE_S3_REGION: ${SAUVEGARDE_EXTERNE_S3_REGION:-us-east-1}
+    volumes:
+      - sauvegardes:/sauvegardes
+      - demandes:/demandes
+      - ${SAUVEGARDE_DISQUE_EXTERNE:-./generated/sans-disque-externe}:/externe
+    networks: [interne, exposee]
+
+  web:
+    image: ${IMMOGEST_IMAGE_WEB:-immogest/web}:${IMMOGEST_VERSION:-latest}
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.web
+    restart: unless-stopped
+    depends_on: [app]
+    environment:
+      API_URL: http://app:8080
+    networks: [exposee]
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on: [app, web]
+    environment:
+      IMMOGEST_SITE: ${IMMOGEST_SITE:?exécutez install.sh}
+    ports:
+      - "${IMMOGEST_HTTP_PORT:-80}:80"
+      - "${IMMOGEST_HTTPS_PORT:-443}:443"
+      - "${IMMOGEST_HTTPS_PORT:-443}:443/udp"
+    volumes:
+      - ./${CADDYFILE:-Caddyfile.domaine}:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    networks: [exposee]
+
+  # Accès depuis Internet sans ouvrir de port (installation derrière un routeur) : le tunnel joint Caddy en HTTP, dans le réseau Docker.
+  cloudflared:
+    profiles: ["tunnel"]
+    image: cloudflare/cloudflared:latest
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run
+    environment:
+      TUNNEL_TOKEN: ${CLOUDFLARE_TUNNEL_TOKEN:-}
+    depends_on: [caddy]
+    networks: [exposee]
+
+networks:
+  interne:
+    internal: true
+  exposee:
+
+volumes:
+  pgdata:
+  sauvegardes:
+  demandes:
+  seaweed:
+  caddy_data:
+  caddy_config:

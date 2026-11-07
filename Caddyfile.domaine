@@ -1,0 +1,21 @@
+# Mode « domaine » : certificat Let's Encrypt automatique (ports 80 et 443 joignables depuis Internet, DNS du domaine vers ce serveur).
+{$IMMOGEST_SITE} {
+  encode zstd gzip
+  header {
+    Strict-Transport-Security "max-age=31536000"
+    X-Content-Type-Options nosniff
+    Referrer-Policy strict-origin-when-cross-origin
+    -Server
+  }
+  # L'API (aussi appelée directement par l'app mobile) ; tout le reste est l'interface web.
+  # /actuator et la documentation OpenAPI ne sont jamais exposés.
+  handle /api/v1/* {
+    request_body {
+      max_size 12MB
+    }
+    reverse_proxy app:8080
+  }
+  handle {
+    reverse_proxy web:3000
+  }
+}

@@ -1,0 +1,27 @@
+# Mode « réseau local » : adresse IP ou nom interne, certificat émis par l'autorité locale de Caddy (les navigateurs affichent un avertissement
+# tant que son certificat racine n'est pas installé sur les postes). Les webhooks d'agrégateurs ne sont pas joignables.
+{$IMMOGEST_SITE} {
+  tls internal
+  @webhooks path /api/v1/webhooks/*
+  handle @webhooks {
+    respond 404
+  }
+  encode zstd gzip
+  header {
+    Strict-Transport-Security "max-age=31536000"
+    X-Content-Type-Options nosniff
+    Referrer-Policy strict-origin-when-cross-origin
+    -Server
+  }
+  # L'API (aussi appelée directement par l'app mobile) ; tout le reste est l'interface web.
+  # /actuator et la documentation OpenAPI ne sont jamais exposés.
+  handle /api/v1/* {
+    request_body {
+      max_size 12MB
+    }
+    reverse_proxy app:8080
+  }
+  handle {
+    reverse_proxy web:3000
+  }
+}

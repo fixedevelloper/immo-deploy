@@ -1,0 +1,4 @@
+.env
+generated/
+.avant-mise-a-jour/
+.update.lock
