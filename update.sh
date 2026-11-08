@@ -13,6 +13,10 @@
 # Option : --yes (sans confirmation).
 # La somme de contrôle est vérifiée AVANT toute modification de l'installation en cours.
 set -euo pipefail
+# Tout le script est dans main() : bash lit et analyse une fonction EN ENTIER avant de l'exécuter. Or la mise à jour recopie les fichiers de la nouvelle
+# version, update.sh compris, pendant que ce script tourne : sans cela, bash continuerait sa lecture à la même position dans le NOUVEAU fichier
+# (« ./update.sh: line 110: META: unbound variable » lors d'une mise à jour depuis 0.1.0, dont le update.sh n'est pas protégé).
+main() {
 cd "$(dirname "${BASH_SOURCE[0]}")"
 
 ARCHIVE=""; URL=""; SHA=""; VERSION=""; SOURCES=0; YES=0; VERIFIER=0; PREFIXE=""
@@ -194,3 +198,7 @@ curl_ok=$(docker compose exec -T app curl -fsS http://localhost:8080/api/v1/heal
 
 echo
 echo "ImmoGest est à jour : $ANCIENNE → $VERSION. Sauvegarde d'avant mise à jour conservée : $SAUVEGARDE_ID."
+}
+
+main "$@"
+exit 0
